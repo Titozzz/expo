@@ -225,7 +225,7 @@ open class FileDownloader(private val client: OkHttpClient) {
             override fun onCompleted(isValid: Boolean) {
               if (isValid) {
                 try {
-                  createManifest(manifestBody, preManifest, manifestHeaderData, extensions, true, configuration, callback)
+                  checkCodeSigningAndCreateManifest(manifestBody, preManifest, manifestHeaderData, extensions, true, configuration, callback)
                 } catch (e: Exception) {
                   callback.onFailure("Failed to parse manifest data", e)
                 }
@@ -239,7 +239,7 @@ open class FileDownloader(private val client: OkHttpClient) {
           }
         )
       } else {
-        createManifest(manifestBody, preManifest, manifestHeaderData, extensions, false, configuration, callback)
+        checkCodeSigningAndCreateManifest(manifestBody, preManifest, manifestHeaderData, extensions, false, configuration, callback)
       }
     } catch (e: Exception) {
       callback.onFailure(
@@ -365,7 +365,7 @@ open class FileDownloader(private val client: OkHttpClient) {
     private const val CRLF = "\r\n"
 
     @Throws(Exception::class)
-    private fun createManifest(
+    private fun checkCodeSigningAndCreateManifest(
       bodyString: String,
       preManifest: JSONObject,
       manifestHeaderData: ManifestHeaderData,
@@ -374,22 +374,34 @@ open class FileDownloader(private val client: OkHttpClient) {
       configuration: UpdatesConfiguration,
       callback: ManifestDownloadCallback
     ) {
-      try {
-        configuration.codeSigningConfiguration?.let {
-          val isSignatureValid = Crypto.isSignatureValid(
-            it,
-            Crypto.parseSignatureHeader(manifestHeaderData.signature),
-            bodyString.toByteArray()
-          )
-          if (!isSignatureValid) {
-            throw IOException("Manifest download was successful, but signature was incorrect")
-          }
-        }
-      } catch (e: Exception) {
-        callback.onFailure("Downloaded manifest signature is invalid", e)
-        return
-      }
+      val codeSigningConfiguration = configuration.codeSigningConfiguration
+      if (codeSigningConfiguration != null) {
+        codeSigningConfiguration.validateSignature(
+          Crypto.parseSignatureHeader(manifestHeaderData.signature),
+          bodyString.toByteArray(),
+          object : Crypto.ValidateSignatureCallback {
+            override fun onFailure(e: Exception) {
+              callback.onFailure("Downloaded manifest signature is invalid", e)
+            }
 
+            override fun onSuccess() {
+              createManifest(preManifest, manifestHeaderData, extensions, isVerified, configuration, callback)
+            }
+          })
+      } else {
+        createManifest(preManifest, manifestHeaderData, extensions, isVerified, configuration, callback)
+      }
+    }
+
+    @Throws(Exception::class)
+    private fun createManifest(
+      preManifest: JSONObject,
+      manifestHeaderData: ManifestHeaderData,
+      extensions: JSONObject?,
+      isVerified: Boolean,
+      configuration: UpdatesConfiguration,
+      callback: ManifestDownloadCallback
+    ) {
       if (configuration.expectsSignedManifest) {
         preManifest.put("isVerified", isVerified)
       }

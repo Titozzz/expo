@@ -121,7 +121,7 @@ class CryptoTest {
       mapOf(
         Crypto.CODE_SIGNING_METADATA_KEY_ID_KEY to "test"
       )
-    ).embeddedCertificate
+    ).certificate
   }
 
   @Test(expected = CertificateExpiredException::class)
@@ -132,7 +132,7 @@ class CryptoTest {
       mapOf(
         Crypto.CODE_SIGNING_METADATA_KEY_ID_KEY to "test"
       )
-    ).embeddedCertificate
+    ).certificate
   }
 
   @Test(expected = CertificateException::class)
@@ -143,7 +143,7 @@ class CryptoTest {
       mapOf(
         Crypto.CODE_SIGNING_METADATA_KEY_ID_KEY to "test"
       )
-    ).embeddedCertificate
+    ).certificate
   }
 
   @Test(expected = CertificateException::class)
@@ -154,6 +154,6 @@ class CryptoTest {
       mapOf(
         Crypto.CODE_SIGNING_METADATA_KEY_ID_KEY to "test"
       )
-    ).embeddedCertificate
+    ).certificate
   }
 }

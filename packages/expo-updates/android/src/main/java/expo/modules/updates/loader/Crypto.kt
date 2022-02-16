@@ -16,6 +16,7 @@ import java.security.spec.InvalidKeySpecException
 import java.security.spec.X509EncodedKeySpec
 import expo.modules.structuredheaders.Parser
 import expo.modules.structuredheaders.StringItem
+import expo.modules.updates.manifest.UpdateManifest
 
 object Crypto {
   private val TAG = Crypto::class.java.simpleName
@@ -138,23 +139,55 @@ object Crypto {
     }
   }
 
-  data class CodeSigningConfiguration(private val certificateString: String, private val metadata: Map<String, String>?) {
-    val embeddedCertificate: X509Certificate by lazy {
-      val certificateFactory = CertificateFactory.getInstance("X.509")
-      val certificate = certificateFactory.generateCertificate(certificateString.byteInputStream()) as X509Certificate
-      certificate.checkValidity()
+  interface ValidateSignatureCallback {
+    fun onFailure(e: Exception)
+    fun onSuccess()
+  }
 
-      val keyUsage: BooleanArray? = certificate.keyUsage
-      if (keyUsage == null || keyUsage.isEmpty() || !keyUsage[0]) {
-        throw CertificateException("X509v3 Key Usage: Digital Signature not present")
+  data class CodeSigningConfiguration(
+    private val embeddedCertificateChainAndMetadata: CertificateChainAndMetadata,
+    private val requiresIntermediateCertificateAtUrl: String?
+  ) {
+    fun validateSignature(info: SignatureHeaderInfo, bodyBytes: ByteArray, callback: ValidateSignatureCallback) {
+      val isSignatureValid = isSignatureValid(
+        embeddedCertificateChainAndMetadata,
+        info,
+        bodyBytes
+      )
+      if (!isSignatureValid) {
+        callback.onFailure(IOException("Manifest download was successful, but signature was incorrect"))
+      } else {
+        callback.onSuccess()
       }
+    }
+  }
 
-      val extendedKeyUsage = certificate.extendedKeyUsage
-      if (!extendedKeyUsage.contains(CODE_SIGNING_OID)) {
-        throw CertificateException("X509v3 Extended Key Usage: Code Signing not present")
+  data class CertificateChain(val certificateChainCertificates: List<String>)
+
+  data class CertificateChainAndMetadata(
+    private val embeddedRootCertificateString: String,
+    private val certificateChain: List<String>?,
+    private val metadata: Map<String, String>?,
+  ) {
+    val codeSigningCertificate: X509Certificate by lazy {
+      val embeddedRootCertificate = constructCertificate(embeddedRootCertificateString)
+      if (embeddedRootCertificate.isCodeSigningCertificate()) {
+        embeddedRootCertificate
+      } else {
+        if (certificateChain == null) {
+          throw CertificateException("No code signing certificate found. Must have X509v3 Key Usage: Digital Signature and X509v3 Extended Key Usage: Code Signing")
+        }
+        val chainCertificates = certificateChain.map { constructCertificate(it) }
+        val fullChain = chainCertificates.toMutableList().apply {
+          add(embeddedRootCertificate)
+          validateChain()
+        }
+        val leafCertificate = fullChain[0]
+        if (!leafCertificate.isCodeSigningCertificate()) {
+          throw CertificateException("Leaf certificate in chain is not a code signing certificate. Must have X509v3 Key Usage: Digital Signature and X509v3 Extended Key Usage: Code Signing")
+        }
+        leafCertificate
       }
-
-      certificate
     }
 
     val algorithm: CodeSigningAlgorithm by lazy {
@@ -164,14 +197,41 @@ object Crypto {
     val keyId: String by lazy {
       metadata?.get(CODE_SIGNING_METADATA_KEY_ID_KEY) ?: CODE_SIGNING_METADATA_DEFAULT_KEY_ID
     }
+
+    companion object {
+      private fun constructCertificate(certificateString: String): X509Certificate {
+        return (CertificateFactory.getInstance("X.509").generateCertificate(certificateString.byteInputStream()) as X509Certificate).apply {
+          checkValidity()
+        }
+      }
+
+      private fun X509Certificate.isCodeSigningCertificate(): Boolean {
+        return keyUsage != null && keyUsage.isNotEmpty() && keyUsage[0] && extendedKeyUsage.contains(CODE_SIGNING_OID)
+      }
+
+      private fun List<X509Certificate>.validateChain() {
+        for (i in 0 until size - 1) {
+          val cert = get(i)
+          val issuer = get(i + 1)
+          if (cert.issuerX500Principal !== issuer.subjectX500Principal) {
+            throw CertificateException("Certificates do not chain")
+          }
+          cert.verify(issuer.publicKey)
+        }
+        // last (root) must be self-signed, verify the final cert
+        if (last().issuerX500Principal == last().subjectX500Principal) {
+          last().verify(last().publicKey)
+        }
+      }
+    }
   }
 
-  fun createAcceptSignatureHeader(codeSigningConfiguration: CodeSigningConfiguration): String {
+  fun createAcceptSignatureHeader(certificateChainAndMetadata: CertificateChainAndMetadata): String {
     return Dictionary.valueOf(
       mapOf(
         CODE_SIGNING_SIGNATURE_STRUCTURED_FIELD_KEY_SIGNATURE to BooleanItem.valueOf(true),
-        CODE_SIGNING_SIGNATURE_STRUCTURED_FIELD_KEY_KEY_ID to StringItem.valueOf(codeSigningConfiguration.keyId),
-        CODE_SIGNING_SIGNATURE_STRUCTURED_FIELD_KEY_ALGORITHM to StringItem.valueOf(codeSigningConfiguration.algorithm.algorithmName)
+        CODE_SIGNING_SIGNATURE_STRUCTURED_FIELD_KEY_KEY_ID to StringItem.valueOf(certificateChainAndMetadata.keyId),
+        CODE_SIGNING_SIGNATURE_STRUCTURED_FIELD_KEY_ALGORITHM to StringItem.valueOf(certificateChainAndMetadata.algorithm.algorithmName)
       )
     ).serialize()
   }
@@ -202,25 +262,26 @@ object Crypto {
     return SignatureHeaderInfo(signature, keyId, CodeSigningAlgorithm.parseFromString(alg))
   }
 
-  fun isSignatureValid(configuration: CodeSigningConfiguration, info: SignatureHeaderInfo, bytes: ByteArray): Boolean {
-    // check that the key used to sign the response is the same as the key embedded in the configuration
-    // TODO(wschurman): this may change for child certificates and development certificates
-    if (info.keyId != configuration.keyId) {
+  fun isSignatureValid(certificateChainAndMetadata: CertificateChainAndMetadata, info: SignatureHeaderInfo, bytes: ByteArray): Boolean {
+    val certificate = certificateChainAndMetadata.codeSigningCertificate
+
+    // check that the key used to sign the response is the same as the key in the code signing certificate
+    if (info.keyId != certificateChainAndMetadata.keyId) {
       throw Exception("Key with keyid=${info.keyId} from signature not found in client configuration")
     }
 
     // note that a mismatched algorithm doesn't fail early. it still tries to verify the signature with the
     // algorithm specified in the configuration
-    if (info.algorithm != configuration.algorithm) {
+    if (info.algorithm != certificateChainAndMetadata.algorithm) {
       Log.i(TAG, "Key with alg=${info.algorithm} from signature does not match client configuration algorithm, continuing")
     }
 
     return Signature.getInstance(
-      when (configuration.algorithm) {
+      when (certificateChainAndMetadata.algorithm) {
         CodeSigningAlgorithm.RSA_SHA256 -> "SHA256withRSA"
       }
     ).apply {
-      initVerify(configuration.embeddedCertificate.publicKey)
+      initVerify(certificate.publicKey)
       update(bytes)
     }.verify(Base64.decode(info.signature, Base64.DEFAULT))
   }

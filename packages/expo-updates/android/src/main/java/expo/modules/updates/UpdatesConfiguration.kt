@@ -20,6 +20,7 @@ class UpdatesConfiguration private constructor (
   val requestHeaders: Map<String, String>,
   val codeSigningCertificate: String?,
   val codeSigningMetadata: Map<String, String>?,
+  val codeSigningRequiresIntermediateCertificateAtUrl: String?,
 ) {
   enum class CheckAutomaticallyConfiguration {
     NEVER, ERROR_RECOVERY_ONLY, WIFI_ONLY, ALWAYS
@@ -62,6 +63,7 @@ class UpdatesConfiguration private constructor (
     codeSigningMetadata = overrideMap?.readValueCheckingType<Map<String, String>>(UPDATES_CONFIGURATION_CODE_SIGNING_METADATA) ?: (context?.getMetadataValue<String>("expo.modules.updates.CODE_SIGNING_METADATA") ?: "{}").let {
       UpdatesUtils.getMapFromJSONString(it)
     },
+    codeSigningRequiresIntermediateCertificateAtUrl = overrideMap?.readValueCheckingType<String>(UPDATES_CONFIGURATION_CODE_SIGNING_REQUIRES_INTERMEDIATE_CERTIFICATE_AT_URL) ?: context?.getMetadataValue("expo.modules.updates.CODE_SIGNING_REQUIRES_INTERMEDIATE_CERTIFICATE_AT_URL"),
   )
 
   val isMissingRuntimeVersion: Boolean
@@ -70,7 +72,7 @@ class UpdatesConfiguration private constructor (
 
   val codeSigningConfiguration: Crypto.CodeSigningConfiguration? by lazy {
     codeSigningCertificate?.let {
-      Crypto.CodeSigningConfiguration(it, codeSigningMetadata)
+      Crypto.CodeSigningConfiguration(Crypto.CertificateChainAndMetadata(it, codeSigningMetadata), codeSigningRequiresIntermediateCertificateAtUrl)
     }
   }
 
@@ -88,6 +90,8 @@ class UpdatesConfiguration private constructor (
     const val UPDATES_CONFIGURATION_LAUNCH_WAIT_MS_KEY = "launchWaitMs"
     const val UPDATES_CONFIGURATION_HAS_EMBEDDED_UPDATE_KEY = "hasEmbeddedUpdate"
     const val UPDATES_CONFIGURATION_EXPECTS_EXPO_SIGNED_MANIFEST = "expectsSignedManifest"
+
+    const val UPDATES_CONFIGURATION_CODE_SIGNING_REQUIRES_INTERMEDIATE_CERTIFICATE_AT_URL = "codeSigningIntermediateCertificateUrl"
     const val UPDATES_CONFIGURATION_CODE_SIGNING_CERTIFICATE = "codeSigningCertificate"
     const val UPDATES_CONFIGURATION_CODE_SIGNING_METADATA = "codeSigningMetadata"
 
